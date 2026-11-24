@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI大喜利</title>
+<style>
+:root{--bg:#fff7ef;--card:#fff;--ink:#4a3428;--accent:#ff7a59;--sub:#8a6f60;--line:#f0d9c8}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:"Hiragino Maru Gothic ProN","Yu Gothic",Meiryo,sans-serif;min-height:100vh}
+#app{max-width:1100px;margin:0 auto;padding:16px;display:grid;gap:14px}
+.card{background:var(--card);border:2px solid var(--line);border-radius:18px;padding:16px}
+h1{margin:0;font-size:22px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+input,select,button{font:inherit;padding:8px 12px;border-radius:10px;border:2px solid var(--line);background:#fff;color:var(--ink)}
+button{background:var(--accent);color:#fff;border-color:var(--accent);cursor:pointer;font-weight:bold}
+button.ghost{background:#fff;color:var(--ink);border-color:var(--line)}
+button:disabled{opacity:.5;cursor:default}
+#status{font-size:13px;color:var(--sub)}
+#bar{height:8px;background:var(--line);border-radius:6px;overflow:hidden;margin-top:6px}
+#bar i{display:block;height:100%;width:0;background:var(--accent)}
+#odai{font-size:clamp(26px,4.5vw,46px);font-weight:bold;text-align:center;padding:22px 8px;line-height:1.4}
+#phase{text-align:center;color:var(--sub);font-size:15px}
+#timer{text-align:center;font-size:32px;font-weight:bold;color:var(--accent)}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media(max-width:800px){.cols{grid-template-columns:1fr}}
+.list{display:grid;gap:8px;max-height:46vh;overflow:auto}
+.ans{border:2px solid var(--line);border-radius:12px;padding:8px 12px;background:#fffdf9;animation:pop .3s}
+.ans b{color:var(--accent)}
+.ans .who{font-size:12px;color:var(--sub)}
+.rank{display:grid;grid-template-columns:48px 1fr 56px;gap:8px;align-items:center;border:2px solid var(--line);border-radius:12px;padding:8px 12px;background:#fffdf9;animation:pop .4s}
+.rank .n{font-size:24px;font-weight:bold;color:var(--accent);text-align:center}
+.rank .pt{font-size:22px;font-weight:bold;text-align:right}
+.rank.top{background:#fff0d6;border-color:#ffb347}
+.cm{font-size:13px;color:var(--sub)}
+.total{display:flex;justify-content:space-between;padding:4px 8px;border-bottom:1px dashed var(--line)}
+@keyframes pop{from{transform:scale(.9);opacity:0}to{transform:none;opacity:1}}
+small{color:var(--sub)}
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="card">
+    <div class="row"><h1>🎤 AI大喜利</h1><span id="status">準備中…</span></div>
+    <div id="bar"><i></i></div>
+    <div class="row" style="margin-top:10px">
+      <label>Twitchチャンネル <input id="ch" value="tomochiiradio" size="16"></label>
+      <label>回答時間 <select id="sec"><option>30</option><option selected>60</option><option>90</option><option>120</option></select>秒</label>
+      <label><input type="checkbox" id="voice" checked style="width:auto"> ボイス</label>
+      <button id="btnAI" class="ghost">AIを読み込む（約1GB・初回のみ）</button>
+      <button id="btnStart">ゲーム開始</button>
+      <button id="btnSkip" class="ghost" disabled>回答を締め切る</button>
+    </div>
+    <small>AIなしでも遊べます（お題は用意済みの中から、採点は適当な点数とひとことになります）。チャットで普通に書き込むと回答になります（1人1回・40文字まで）。</small>
+  </div>
+
+  <div class="card">
+    <div id="phase">「ゲーム開始」を押してください</div>
+    <div id="odai">お題がここに出ます</div>
+    <div id="timer"></div>
+  </div>
+
+  <div class="cols">
+    <div class="card"><b>📨 みんなの回答（<span id="cnt">0</span>）</b><div id="answers" class="list" style="margin-top:8px"></div>
+      <div class="row" style="margin-top:8px"><input id="test" placeholder="テスト回答（配信なしで試す）" style="flex:1"><button id="btnTest" class="ghost">送る</button></div>
+    </div>
+    <div class="card"><b>🏆 今回のランキング</b><div id="ranking" class="list" style="margin-top:8px"></div>
+      <b style="display:block;margin-top:12px">📊 累計ポイント</b><div id="totals" style="margin-top:6px"></div>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+const $ = id => document.getElementById(id);
+const status = t => $('status').textContent = t;
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// ===== ボイス =====
+function speak(text){
+  if(!$('voice').checked || !('speechSynthesis' in window)) return Promise.resolve();
+  return new Promise(res => {
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = 'ja-JP'; u.rate = 1.05;
+    const v = speechSynthesis.getVoices().find(v => v.lang.startsWith('ja'));
+    if(v) u.voice = v;
+    u.onend = u.onerror = () => res();
+    speechSynthesis.speak(u);
+    setTimeout(res, 12000); // 念のため
+  });
+}
+
+// ===== AI（WebLLM）=====
+let engine = null;
+const MODEL = 'Qwen2.5-1.5B-Instruct-q4f16_1-MLC';
+$('btnAI').onclick = async () => {
+  if(!navigator.gpu){ status('このブラウザはWebGPU非対応です。通常のChromeで開いてください（AIなしで遊べます）'); return; }
+  $('btnAI').disabled = true;
+  try{
+    const webllm = await import('https://esm.run/@mlc-ai/web-llm');
+    engine = await webllm.CreateMLCEngine(MODEL, {
+      initProgressCallback: p => { status('AI読み込み中：' + p.text); $('bar').firstElementChild.style.width = Math.round((p.progress||0)*100) + '%'; }
+    });
+    status('AIの準備ができました');
+    $('btnAI').textContent = 'AI読み込み済み ✔';
+  }catch(e){
+    console.error(e); engine = null; $('btnAI').disabled = false;
+    status('AIの読み込みに失敗しました：' + (e.message||e) + '（AIなしで遊べます）');
+  }
+};
+async function ask(system, user, max=60){
+  const r = await engine.chat.completions.create({
+    messages:[{role:'system',content:system},{role:'user',content:user}],
+    temperature:0.9, max_tokens:max
+  });
+  return (r.choices[0].message.content||'').trim();
+}
+
+// ===== お題 =====
+const ODAI = [
+ 'こんな配信者は嫌だ。どんな配信者？','コンビニの新商品。その名前は？','犬が突然しゃべりだした。最初の一言は？',
+ '朝起きたら枕元にいたもの。それは？','AIが人間にこっそり隠していること。それは？','カレーに入れてはいけないもの。それは？',
+ '宇宙人が地球で最初に覚えた日本語は？','こんなゲームはクソゲー。どんなゲーム？','校長先生の話が長い本当の理由は？',
+ 'この配信の裏側で起きていること。それは？','サンタが来年はやめようと思った理由は？','魔王が勇者に言った意外な一言は？'
+];
+let lastOdai = '';
+async function makeOdai(){
+  if(engine){
+    try{
+      const t = await ask('あなたは大喜利の出題者です。日本語で、短くて答えやすいお題を1つだけ出します。お題の文だけを出力し、説明や答えは書かないでください。',
+        '例：「こんな配信者は嫌だ。どんな配信者？」\nのような新しいお題を1つ。', 50);
+      const clean = t.split('\n')[0].replace(/^[「『"\s]+|[」』"\s]+$/g,'');
+      if(clean.length >= 8 && clean.length <= 50 && clean !== lastOdai) return (lastOdai = clean);
+    }catch(e){ console.error(e); }
+  }
+  let o; do{ o = ODAI[Math.random()*ODAI.length|0]; }while(o === lastOdai && ODAI.length>1);
+  return (lastOdai = o);
+}
+
+// ===== 採点（判定はコード、AIは雰囲気だけ）=====
+const FALLBACK = ['ふふっ、悪くないですね','これは…どう受け取ればいいんでしょう','座布団1枚あげたいところです','ちょっと攻めすぎでは？','天才か、ただの事故か','じわじわ来ますね','会場が静まり返りました','発想が自由すぎます'];
+async function judge(odai, a){
+  let score = null, comment = '';
+  if(engine){
+    try{
+      const t = await ask('あなたはお笑い番組の司会者です。大喜利の回答に10点満点で点数をつけ、20文字以内でユーモラスにひとこと講評します。必ず次の形式だけで出力します。\n点数:数字\n講評:ひとこと',
+        `お題：${odai}\n回答：${a.text}`, 60);
+      const m = t.match(/点数\s*[:：]\s*(\d+)/);
+      const c = t.match(/講評\s*[:：]\s*(.+)/);
+      if(m) score = Math.min(10, Math.max(1, parseInt(m[1],10)));
+      if(c) comment = c[1].trim().slice(0,40);
+    }catch(e){ console.error(e); }
+  }
+  if(score === null) score = 3 + (Math.random()*7|0);
+  if(!comment) comment = FALLBACK[Math.random()*FALLBACK.length|0];
+  return {score, comment};
+}
+
+// ===== Twitchチャット（匿名接続）=====
+let ws = null, collecting = false, answers = new Map();
+const totals = new Map();
+function connectChat(){
+  const ch = $('ch').value.trim().toLowerCase().replace(/[^a-z0-9_]/g,'');
+  if(ws){ ws.onclose = null; ws.close(); }
+  if(!ch) return;
+  ws = new WebSocket('wss://irc-ws.chat.twitch.tv:443');
+  ws.onopen = () => {
+    ws.send('CAP REQ :twitch.tv/tags');
+    ws.send('PASS SCHMOOPIIE');
+    ws.send('NICK justinfan' + (10000 + (Math.random()*80000|0)));
+    ws.send('JOIN #' + ch);
+  };
+  ws.onmessage = ev => {
+    for(const line of String(ev.data).split('\r\n')){
+      if(line.startsWith('PING')){ ws.send('PONG :tmi.twitch.tv'); continue; }
+      const m = line.match(/^(?:@(\S+) )?:([^!]+)![^ ]+ PRIVMSG #\S+ :(.*)$/);
+      if(!m) continue;
+      const tags = Object.fromEntries((m[1]||'').split(';').map(s => s.split('=')));
+      const name = (tags['display-name'] || m[2]).replace(/\\s/g,' ');
+      const text = m[3];
+      if(text.startsWith('!')) continue;
+      addAnswer(name, text);
+    }
+  };
+  ws.onclose = () => setTimeout(connectChat, 5000);
+}
+function addAnswer(name, text){
+  if(!collecting) return;
+  text = text.trim().slice(0,40);
+  if(!text || answers.has(name)) return;
+  answers.set(name, {name, text});
+  const d = document.createElement('div'); d.className = 'ans';
+  d.innerHTML = '<div class="who"></div><b></b>';
+  d.firstChild.textContent = name; d.lastChild.textContent = text;
+  $('answers').prepend(d);
+  $('cnt').textContent = answers.size;
+}
+$('ch').onchange = connectChat;
+$('btnTest').onclick = () => { const v = $('test').value; if(v){ addAnswer('テスト' + (answers.size+1), v); $('test').value=''; } };
+$('test').onkeydown = e => { if(e.key==='Enter') $('btnTest').click(); };
+
+// ===== ゲーム進行 =====
+let skip = false, running = false;
+$('btnSkip').onclick = () => skip = true;
+$('btnStart').onclick = async () => {
+  if(running){ running = false; skip = true; return; }
+  running = true; $('btnStart').textContent = 'ゲーム停止'; connectChat();
+  while(running){ await round(); if(running) await sleep(4000); }
+  $('btnStart').textContent = 'ゲーム開始'; $('btnSkip').disabled = true;
+  $('phase').textContent = '停止しました'; $('timer').textContent = '';
+};
+
+async function round(){
+  answers.clear(); $('answers').innerHTML = ''; $('ranking').innerHTML = ''; $('cnt').textContent = 0; skip = false;
+  $('phase').textContent = 'お題を考え中…'; $('odai').textContent = '…';
+  const odai = await makeOdai();
+  $('odai').textContent = odai; $('phase').textContent = '回答受付中！チャットに書き込んでください';
+  const sp = speak('お題です。' + odai);
+  collecting = true; $('btnSkip').disabled = false;
+  let left = parseInt($('sec').value, 10);
+  while(left > 0 && !skip && running){ $('timer').textContent = '⏱ ' + left; await sleep(1000); left--; }
+  collecting = false; $('btnSkip').disabled = true; $('timer').textContent = '';
+  await sp; if(!running) return;
+  let list = [...answers.values()];
+  if(list.length === 0){ $('phase').textContent = '回答がありませんでした…'; await speak('回答がありませんでした。次のお題にいきましょう。'); return; }
+  if(list.length > 12) list = list.sort(() => Math.random()-.5).slice(0,12); // 小さいAIでも間に合うよう最大12件
+  $('phase').textContent = '採点中…'; speak('それでは採点します。');
+  const results = [];
+  for(const a of list){
+    if(!running) return;
+    const j = await judge(odai, a);
+    results.push({...a, ...j});
+    totals.set(a.name, (totals.get(a.name)||0) + j.score);
+    status('採点中 ' + results.length + '/' + list.length);
+  }
+  results.sort((x,y) => y.score - x.score);
+  $('phase').textContent = '結果発表！'; status('');
+  const box = $('ranking');
+  for(let i=0;i<results.length;i++){
+    const r = results[i];
+    const d = document.createElement('div'); d.className = 'rank' + (i===0?' top':'');
+    d.innerHTML = '<div class="n"></div><div><b></b><div class="cm"></div></div><div class="pt"></div>';
+    d.children[0].textContent = i+1; d.querySelector('b').textContent = r.text;
+    d.querySelector('.cm').textContent = r.name + '：' + r.comment; d.children[2].textContent = r.score + '点';
+    box.appendChild(d);
+  }
+  renderTotals();
+  // 上位3つだけ読み上げ
+  for(const [i,r] of results.slice(0,3).entries()){
+    if(!running) return;
+    await speak(`${i+1}位、${r.name}さん。${r.text}。${r.score}点。${r.comment}`);
+  }
+}
+function renderTotals(){
+  const t = $('totals'); t.innerHTML = '';
+  [...totals.entries()].sort((a,b)=>b[1]-a[1]).slice(0,8).forEach(([n,p],i)=>{
+    const d = document.createElement('div'); d.className = 'total';
+    d.innerHTML = '<span></span><b></b>'; d.firstChild.textContent = (i+1)+'. '+n; d.lastChild.textContent = p+'点'; t.appendChild(d);
+  });
+}
+speechSynthesis?.getVoices?.();
+status(navigator.gpu ? '準備OK（AIは任意）' : 'WebGPU非対応：AIなしモードで動きます');
+</script>
+</body>
+</html>
