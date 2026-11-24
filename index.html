@@ -107,11 +107,11 @@ $('btnAI').onclick = async () => {
     status('AIの読み込みに失敗しました：' + (e.message||e) + '（AIなしで遊べます）');
   }
 };
-async function ask(system, user, max=60){
-  const r = await engine.chat.completions.create({
-    messages:[{role:'system',content:system},{role:'user',content:user}],
-    temperature:0.9, max_tokens:max
-  });
+async function ask(system, user, max=60, shots=[], temp=0.9){
+  const messages=[{role:'system',content:system}];
+  for(const [u,a] of shots){ messages.push({role:'user',content:u},{role:'assistant',content:a}); }
+  messages.push({role:'user',content:user});
+  const r = await engine.chat.completions.create({messages, temperature:temp, top_p:0.95, max_tokens:max});
   return (r.choices[0].message.content||'').trim();
 }
 
@@ -120,40 +120,67 @@ const ODAI = [
  'こんな配信者は嫌だ。どんな配信者？','コンビニの新商品。その名前は？','犬が突然しゃべりだした。最初の一言は？',
  '朝起きたら枕元にいたもの。それは？','AIが人間にこっそり隠していること。それは？','カレーに入れてはいけないもの。それは？',
  '宇宙人が地球で最初に覚えた日本語は？','こんなゲームはクソゲー。どんなゲーム？','校長先生の話が長い本当の理由は？',
- 'この配信の裏側で起きていること。それは？','サンタが来年はやめようと思った理由は？','魔王が勇者に言った意外な一言は？'
+ 'この配信の裏側で起きていること。それは？','サンタが来年はやめようと思った理由は？','魔王が勇者に言った意外な一言は？',
+ 'ラーメン屋の大将が急に無口になった。その理由は？','新幹線の車内アナウンスで絶対に流れてはいけない一言は？','猫が会議に出席。第一声は？',
+ '100円ショップで売っていて驚いたもの。それは？','勇者のパーティーを追放された理由は？','カラオケで歌うと一気に空気が変わる曲。どんな曲？',
+ '冷蔵庫を開けたら入っていてほしくないもの。それは？','このコメント欄が今夜だけ守るルール。それは？','おばあちゃんの家にだけある謎のルール。それは？',
+ '履歴書の特技欄に書いたら採用されたこと。それは？','ドラゴンが勇者を倒さなかった理由は？','温泉の効能に書いてあって怖かったこと。それは？',
+ '実は全員やっているのに誰も言わないこと。それは？','ゲームのチュートリアルで急に心が折れる一言は？','神様が初めて人間に送ったLINE。その内容は？',
+ '「その発想はなかった」と言われた、夏休みの自由研究。何を調べた？','ロボットが初めて覚えた感情。それは？','寝坊した言い訳で一番ひどいもの。それは？'
 ];
+const THEMES = ['配信','ゲーム','コンビニ','学校','動物','宇宙','異世界','料理','家電','カフェ','温泉','ヒーロー','会社','電車','AI','お正月','夏休み','恋愛','ペット','魔法','コンビニ弁当','スマホ','ラーメン','おばあちゃん','勇者と魔王'];
 let lastOdai = '';
+function pick(arr,n){ return [...arr].sort(()=>Math.random()-.5).slice(0,n); }
 async function makeOdai(){
   if(engine){
-    try{
-      const t = await ask('あなたは大喜利の出題者です。日本語で、短くて答えやすいお題を1つだけ出します。お題の文だけを出力し、説明や答えは書かないでください。',
-        '例：「こんな配信者は嫌だ。どんな配信者？」\nのような新しいお題を1つ。', 50);
-      const clean = t.split('\n')[0].replace(/^[「『"\s]+|[」』"\s]+$/g,'');
-      if(clean.length >= 8 && clean.length <= 50 && clean !== lastOdai) return (lastOdai = clean);
-    }catch(e){ console.error(e); }
+    for(let k=0;k<2;k++){
+      try{
+        const ex = pick(ODAI,4), theme = pick(THEMES,1)[0];
+        const t = await ask(
+          'あなたは大喜利番組の放送作家です。誰でも一言で答えられて、答えが人によってバラバラになる、おもしろいお題を1つだけ作ります。お題の1文だけを出力し、答えや説明は書きません。難しい言葉は使いません。',
+          '次のお題と同じ雰囲気で、まったく新しいお題を作ってください。\n' + ex.map(e=>'・'+e).join('\n') + '\nテーマ：' + theme + '\nお題：',
+          50, [], 1.0);
+        const clean = t.split('\n')[0].replace(/^[・\-\d.\s「『"]+|[」』"\s]+$/g,'').replace(/^お題[：:]/,'');
+        if(clean.length>=10 && clean.length<=45 && /[？?]$/.test(clean) && clean!==lastOdai && !ex.includes(clean)) return (lastOdai = clean);
+      }catch(e){ console.error(e); }
+    }
   }
   let o; do{ o = ODAI[Math.random()*ODAI.length|0]; }while(o === lastOdai && ODAI.length>1);
   return (lastOdai = o);
 }
 
 // ===== 採点（判定はコード、AIは雰囲気だけ）=====
-const FALLBACK = ['ふふっ、悪くないですね','これは…どう受け取ればいいんでしょう','座布団1枚あげたいところです','ちょっと攻めすぎでは？','天才か、ただの事故か','じわじわ来ますね','会場が静まり返りました','発想が自由すぎます'];
+const FALLBACK = ['ふふっ、これは座布団1枚ですね！','それは予想外でした！','まさかの角度から来ました！','攻めすぎでは？でも好きです！','天才か事故か、紙一重！','じわじわ来ますね！','会場が一瞬静かになりました！','発想が自由すぎます！'];
+const JUDGE_SYS = 'あなたは人気お笑い番組のノリのいい司会者です。大喜利の回答に10点満点で点数をつけ、ひとこと講評します。\n'
+ + '・点数は5〜8点を中心に、最高に面白ければ9〜10点、微妙なら2〜4点\n'
+ + '・講評は15〜25文字で、回答の言葉を拾ってツッコむかほめる。最後は「！」か「？」で終わる\n'
+ + '・出力は必ず次の2行だけ\n点数:数字\n講評:ひとこと';
+const JUDGE_SHOTS = [
+ ['お題：犬が突然しゃべりだした。最初の一言は？\n回答：散歩はまだか','点数:8\n講評:しゃべれても考えることは散歩！'],
+ ['お題：こんな配信者は嫌だ。どんな配信者？\n回答：開始5秒で寝る','点数:7\n講評:それもう配信じゃなくて睡眠！'],
+ ['お題：カレーに入れてはいけないもの。それは？\n回答：あああ','点数:2\n講評:魂の叫びだけは伝わった！'],
+ ['お題：魔王が勇者に言った意外な一言は？\n回答：その剣、メルカリで売れるよ','点数:10\n講評:魔王の目利きがリアルすぎる！']
+];
 async function judge(odai, a){
   let score = null, comment = '';
   if(engine){
     try{
-      const t = await ask('あなたはお笑い番組の司会者です。大喜利の回答に10点満点で点数をつけ、20文字以内でユーモラスにひとこと講評します。必ず次の形式だけで出力します。\n点数:数字\n講評:ひとこと',
-        `お題：${odai}\n回答：${a.text}`, 60);
+      const t = await ask(JUDGE_SYS, `お題：${odai}\n回答：${a.text}`, 80, JUDGE_SHOTS, 0.8);
       const m = t.match(/点数\s*[:：]\s*(\d+)/);
       const c = t.match(/講評\s*[:：]\s*(.+)/);
       if(m) score = Math.min(10, Math.max(1, parseInt(m[1],10)));
-      if(c) comment = c[1].trim().slice(0,40);
+      if(c){
+        let cm = c[1].trim();
+        if(cm.length>30){ const i = cm.search(/[。！？!?]/); cm = i>=4 ? cm.slice(0,i+1) : cm.slice(0,28)+'…'; }
+        if(cm.length>=4) comment = cm;
+      }
     }catch(e){ console.error(e); }
   }
   if(score === null) score = 3 + (Math.random()*7|0);
   if(!comment) comment = FALLBACK[Math.random()*FALLBACK.length|0];
   return {score, comment};
 }
+const reactEmoji = s => s>=9 ? '👑' : s>=7 ? '👏' : s>=5 ? '🙂' : '💦';
 
 // ===== Twitchチャット（匿名接続）=====
 let ws = null, collecting = false, answers = new Map();
@@ -240,15 +267,21 @@ async function round(){
     const d = document.createElement('div'); d.className = 'rank' + (i===0?' top':'');
     d.innerHTML = '<div class="n"></div><div><b></b><div class="cm"></div></div><div class="pt"></div>';
     d.children[0].textContent = i+1; d.querySelector('b').textContent = r.text;
-    d.querySelector('.cm').textContent = r.name + '：' + r.comment; d.children[2].textContent = r.score + '点';
+    d.querySelector('.cm').textContent = reactEmoji(r.score) + ' ' + r.name + '：' + r.comment; d.children[2].textContent = r.score + '点';
     box.appendChild(d);
   }
   renderTotals();
-  // 上位3つだけ読み上げ
-  for(const [i,r] of results.slice(0,3).entries()){
+  // 上位3つだけ、盛り上げて読み上げ（3位→1位の順）
+  const top = results.slice(0,3);
+  await speak('それでは、結果発表です！');
+  for(let i=top.length-1;i>=0;i--){
     if(!running) return;
-    await speak(`${i+1}位、${r.name}さん。${r.text}。${r.score}点。${r.comment}`);
+    const r = top[i];
+    await speak(`第${i+1}位${i===0?'！ドゥルルルル…':''}`);
+    if(i===0) await sleep(800);
+    await speak(`${r.name}さん。${r.text}。${r.score}点！${r.comment}`);
   }
+  if(top[0] && running) await speak(`今回の優勝は、${top[0].name}さんです！おめでとうございます！`);
 }
 function renderTotals(){
   const t = $('totals'); t.innerHTML = '';
