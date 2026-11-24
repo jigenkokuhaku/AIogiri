@@ -47,6 +47,10 @@ small{color:var(--sub)}
       <label>Twitchチャンネル <input id="ch" value="tomochiiradio" size="16"></label>
       <label>回答時間 <select id="sec"><option>30</option><option selected>60</option><option>90</option><option>120</option></select>秒</label>
       <label><input type="checkbox" id="voice" checked style="width:auto"> ボイス</label>
+      <label>声 <select id="vmode"><option value="browser">ブラウザ標準</option><option value="vv">VOICEVOX（自然）</option></select></label>
+      <label>話者ID <input id="vvsp" type="number" value="3" style="width:64px" title="3=ずんだもん 2=四国めたん 8=春日部つむぎ"></label>
+      <button id="btnVoiceTest" class="ghost">声テスト</button>
+      <label><input type="checkbox" id="sfx" checked style="width:auto"> 効果音</label>
       <button id="btnAI" class="ghost">AIを読み込む（約1GB・初回のみ）</button>
       <button id="btnStart">ゲーム開始</button>
       <button id="btnSkip" class="ghost" disabled>回答を締め切る</button>
@@ -75,9 +79,32 @@ const $ = id => document.getElementById(id);
 const status = t => $('status').textContent = t;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+// ===== 効果音（sfx/フォルダのmp3。無ければ無音）=====
+function sfx(name, loop=false){
+  if(!$('sfx').checked) return null;
+  try{ const a = new Audio('sfx/' + name + '.mp3'); a.volume = 0.7; a.loop = loop; a.play().catch(()=>{}); return a; }catch(e){ return null; }
+}
+function sfxWait(name, ms){
+  return new Promise(res => { const a = sfx(name); if(!a) return res(); a.onended = a.onerror = () => res(); setTimeout(res, ms); });
+}
+let loopA = null;
+const startLoop = name => { stopLoop(); loopA = sfx(name, true); };
+const stopLoop = () => { if(loopA){ loopA.pause(); loopA = null; } };
+
 // ===== ボイス =====
-function speak(text){
-  if(!$('voice').checked || !('speechSynthesis' in window)) return Promise.resolve();
+let vvWarned = false;
+async function speakVV(text){
+  const base = 'http://127.0.0.1:50021', sp = parseInt($('vvsp').value,10) || 3;
+  const q = await fetch(`${base}/audio_query?speaker=${sp}&text=${encodeURIComponent(text)}`, {method:'POST'});
+  if(!q.ok) throw new Error('audio_query');
+  const query = await q.json(); query.speedScale = 1.1;
+  const w = await fetch(`${base}/synthesis?speaker=${sp}`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(query)});
+  if(!w.ok) throw new Error('synthesis');
+  const url = URL.createObjectURL(await w.blob());
+  return new Promise(res => { const a = new Audio(url); a.onended = a.onerror = () => { URL.revokeObjectURL(url); res(); }; a.play().catch(()=>res()); });
+}
+function speakBrowser(text){
+  if(!('speechSynthesis' in window)) return Promise.resolve();
   return new Promise(res => {
     const u = new SpeechSynthesisUtterance(text);
     u.lang = 'ja-JP'; u.rate = 1.05;
@@ -85,9 +112,18 @@ function speak(text){
     if(v) u.voice = v;
     u.onend = u.onerror = () => res();
     speechSynthesis.speak(u);
-    setTimeout(res, 12000); // 念のため
+    setTimeout(res, 12000);
   });
 }
+async function speak(text){
+  if(!$('voice').checked) return;
+  if($('vmode').value === 'vv'){
+    try{ await speakVV(text); return; }
+    catch(e){ if(!vvWarned){ vvWarned = true; status('VOICEVOXにつながりません。起動と許可の設定を確認してください（ブラウザ標準の声で続けます）'); } }
+  }
+  await speakBrowser(text);
+}
+$('btnVoiceTest').onclick = () => speak('こんにちは。AI大喜利の司会です。よろしくお願いします。');
 
 // ===== AI（WebLLM）=====
 let engine = null;
@@ -219,7 +255,7 @@ function addAnswer(name, text){
   d.innerHTML = '<div class="who"></div><b></b>';
   d.firstChild.textContent = name; d.lastChild.textContent = text;
   $('answers').prepend(d);
-  $('cnt').textContent = answers.size;
+  $('cnt').textContent = answers.size; sfx('answer_in');
 }
 $('ch').onchange = connectChat;
 $('btnTest').onclick = () => { const v = $('test').value; if(v){ addAnswer('テスト' + (answers.size+1), v); $('test').value=''; } };
@@ -232,7 +268,7 @@ $('btnStart').onclick = async () => {
   if(running){ running = false; skip = true; return; }
   running = true; $('btnStart').textContent = 'ゲーム停止'; connectChat();
   while(running){ await round(); if(running) await sleep(4000); }
-  $('btnStart').textContent = 'ゲーム開始'; $('btnSkip').disabled = true;
+  stopLoop(); $('btnStart').textContent = 'ゲーム開始'; $('btnSkip').disabled = true;
   $('phase').textContent = '停止しました'; $('timer').textContent = '';
 };
 
@@ -240,17 +276,17 @@ async function round(){
   answers.clear(); $('answers').innerHTML = ''; $('ranking').innerHTML = ''; $('cnt').textContent = 0; skip = false;
   $('phase').textContent = 'お題を考え中…'; $('odai').textContent = '…';
   const odai = await makeOdai();
-  $('odai').textContent = odai; $('phase').textContent = '回答受付中！チャットに書き込んでください';
+  $('odai').textContent = odai; $('phase').textContent = '回答受付中！チャットに書き込んでください'; sfx('odai_reveal');
   const sp = speak('お題です。' + odai);
   collecting = true; $('btnSkip').disabled = false;
   let left = parseInt($('sec').value, 10);
-  while(left > 0 && !skip && running){ $('timer').textContent = '⏱ ' + left; await sleep(1000); left--; }
-  collecting = false; $('btnSkip').disabled = true; $('timer').textContent = '';
+  while(left > 0 && !skip && running){ $('timer').textContent = '⏱ ' + left; if(left<=5) sfx('countdown_tick'); await sleep(1000); left--; }
+  collecting = false; $('btnSkip').disabled = true; $('timer').textContent = ''; sfx('time_up');
   await sp; if(!running) return;
   let list = [...answers.values()];
-  if(list.length === 0){ $('phase').textContent = '回答がありませんでした…'; await speak('回答がありませんでした。次のお題にいきましょう。'); return; }
+  if(list.length === 0){ $('phase').textContent = '回答がありませんでした…'; sfx('no_answer'); await speak('回答がありませんでした。次のお題にいきましょう。'); return; }
   if(list.length > 12) list = list.sort(() => Math.random()-.5).slice(0,12); // 小さいAIでも間に合うよう最大12件
-  $('phase').textContent = '採点中…'; speak('それでは採点します。');
+  $('phase').textContent = '採点中…'; startLoop('scoring_loop'); speak('それでは採点します。');
   const results = [];
   for(const a of list){
     if(!running) return;
@@ -260,7 +296,8 @@ async function round(){
     status('採点中 ' + results.length + '/' + list.length);
   }
   results.sort((x,y) => y.score - x.score);
-  $('phase').textContent = '結果発表！'; status('');
+  stopLoop(); $('phase').textContent = '結果発表！'; status('');
+  await sfxWait('drumroll', 4000);
   const box = $('ranking');
   for(let i=0;i<results.length;i++){
     const r = results[i];
@@ -273,15 +310,15 @@ async function round(){
   renderTotals();
   // 上位3つだけ、盛り上げて読み上げ（3位→1位の順）
   const top = results.slice(0,3);
-  await speak('それでは、結果発表です！');
   for(let i=top.length-1;i>=0;i--){
     if(!running) return;
     const r = top[i];
-    await speak(`第${i+1}位${i===0?'！ドゥルルルル…':''}`);
-    if(i===0) await sleep(800);
+    sfx(i===0 ? 'winner_fanfare' : 'rank_reveal');
+    await speak(`第${i+1}位！`);
+    if(r.score>=9) sfx('score_high'); else if(r.score<=3) sfx('score_low');
     await speak(`${r.name}さん。${r.text}。${r.score}点！${r.comment}`);
   }
-  if(top[0] && running) await speak(`今回の優勝は、${top[0].name}さんです！おめでとうございます！`);
+  if(top[0] && running){ sfx('applause'); await speak(`今回の優勝は、${top[0].name}さんです！おめでとうございます！`); }
 }
 function renderTotals(){
   const t = $('totals'); t.innerHTML = '';
